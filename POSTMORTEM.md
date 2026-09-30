@@ -1,5 +1,7 @@
 # Postmortem: bare LF/CR line endings degraded to a 15-second timeout instead of an immediate 400
 
+*CS60: Computer Networks — Lab 2 — Eva Tate and Giselle Wu*
+
 ## The attack
 
 ```

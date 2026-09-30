@@ -84,5 +84,4 @@ description of what the code does.
 
 ## Partner
 
-<!-- TODO: fill in partner's name for the Canvas submission textbox, or
-     remove this section if working solo. -->
+Eva Tate and Giselle Wu.

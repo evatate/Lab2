@@ -2,7 +2,7 @@
 
 # ==============================================================================
 # File Name:     redteam/attack_protocol_edges.py
-# Author:        Eva Tate
+# Author:        Eva Tate and Giselle Wu
 # Course:        CS60: Computer Networks
 # Assignment:    Lab 2: Application layer -- Hardened Web Server Lab
 # Date:          September 29, 2026
