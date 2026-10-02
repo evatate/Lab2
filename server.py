@@ -44,7 +44,8 @@ MAX_REQUEST_LINE = 8192        # -> 414 URI Too Long
 MAX_HEADER_LINE = 8192         # -> 431 Request Header Fields Too Large
 MAX_HEADER_COUNT = 100         # -> 431
 MAX_HEADER_BLOCK_BYTES = 65536 # total bytes of request line + headers -> 414/431
-MAX_BODY_SIZE = 10 * 1024 * 1024  # 10 MiB -> 413 Content Too Large
+MAX_BODY_SIZE = 1024 * 1024     # 1 MiB -> 413 Content Too Large (a GET has no
+                                 # legitimate reason to carry a body this big)
 MAX_CHUNK_SIZE_LINE = 4096     # a single "size\r\n" line in chunked encoding
 
 LISTEN_BACKLOG = 128

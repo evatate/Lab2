@@ -66,9 +66,17 @@ multi-packet transfer).
 server.py                          hardened HTTP/1.1 server
 client.py                          command-line HTTP client
 helloworld.html, english_words.txt test files
-redteam/                           red-team attack scripts (see redteam/NOTES.md)
+http_attack_harness.py             published attack suite (run: python3 http_attack_harness.py [host] [port] [path])
+redteam/                           our own red-team attack scripts (see redteam/NOTES.md)
 POSTMORTEM.md                      Exercise 4 write-up
 ```
+
+`http_attack_harness.py` currently passes clean: no `MUST` failures and no
+`SHOULD` gaps. (One `SHOULD` gap did show up during development -- a 5 MB
+declared body returned `200` instead of `413` because `MAX_BODY_SIZE` in
+`server.py` was set to 10 MiB. Since a `GET` has no legitimate reason to carry
+a body anywhere near that large, the limit was tightened to 1 MiB, which
+fixed it without touching any real request path.)
 
 ## AI assistance
 
