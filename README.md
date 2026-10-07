@@ -68,8 +68,9 @@ client.py                          command-line HTTP client
 helloworld.html, english_words.txt test files
 http_attack_harness.py             published attack suite (run: python3 http_attack_harness.py [host] [port] [path])
 redteam/                           our own red-team attack scripts (see redteam/NOTES.md)
-POSTMORTEM.md                      Exercise 4 write-up
 ```
+
+The postmortem is submitted separately (not part of this repo).
 
 `http_attack_harness.py` currently passes clean: no `MUST` failures and no
 `SHOULD` gaps. (One `SHOULD` gap did show up during development -- a 5 MB
@@ -83,12 +84,12 @@ fixed it without touching any real request path.)
 Written with Claude (Anthropic) as a coding assistant: it wrote the initial
 implementation of `server.py`/`client.py` from the assignment's spec, which
 was then run against hand- and AI-written adversarial inputs, read line by
-line, and fixed where its behavior was wrong (see `POSTMORTEM.md` for a
-specific example — the bare-LF/CR handling initially degraded to a 15-second
-timeout instead of an immediate `400`, which was caught by testing, not by
-inspection). All the numbers in this README and the postmortem come from
-actually running the server and the attack scripts, not from the assistant's
-description of what the code does.
+line, and fixed where its behavior was wrong (see `redteam/NOTES.md` for
+specific examples, including the bare-LF/CR handling initially degrading to
+a 15-second timeout instead of an immediate `400` -- caught by testing, not
+by inspection). All the numbers in this README and `redteam/NOTES.md` come
+from actually running the server and the attack scripts, not from the
+assistant's description of what the code does.
 
 ## Author
 
