@@ -148,11 +148,8 @@ class BufferedReader:
 # parsing
 
 def _check_bare_terminators(buf, checked):
-    """Scan buf for a bare LF/CR, starting from `checked` so a trickled
-    request doesn't get rescanned from byte zero on every recv() (that's
-    quadratic in the final header size). Returns the new checked count. A
-    trailing CR is left unchecked and rescanned next call, since the next
-    recv() may still complete it into a legal CRLF."""
+    """Scan buf for a bare LF/CR from `checked` on; return the new count.
+    A trailing CR is rechecked next time, it may still become CRLF."""
     n = len(buf)
     i = checked
     while i < n:
@@ -348,6 +345,11 @@ def safe_resolve_path(serve_dir, self_paths, raw_target):
     if "\x00" in decoded:
         raise HttpError(400, "null byte in request target")
 
+    # still encoded after one decode: double-encoded traversal attempt
+    again = urllib.parse.unquote(decoded)
+    if again != decoded and (".." in again or "\\" in again or again.count("/") != decoded.count("/")):
+        raise HttpError(403, "double-encoded path")
+
     candidate = os.path.realpath(os.path.join(serve_dir, decoded.lstrip("/")))
 
     if candidate != serve_dir and not candidate.startswith(serve_dir + os.sep):
@@ -476,9 +478,7 @@ SOURCE_EXTENSIONS = (".py", ".md")
 
 
 def collect_source_paths(serve_dir):
-    """Every .py/.md file under serve_dir at startup -- not just server.py and
-    client.py, so redteam/*.py, NOTES.md, README.md etc. are covered too even
-    though they weren't named individually."""
+    """All .py/.md files under serve_dir (blocked with 403)."""
     paths = set()
     for root, _dirs, files in os.walk(serve_dir):
         for name in files:
@@ -522,9 +522,7 @@ def main():
 
     def evict_one():
         """Shut the oldest never-served connection (else oldest overall).
-        Tradeoff: at the cap, this can shut a legitimate client that is still
-        reading its first request, not only an attacker's stalled one -- but
-        the alternative (refuse new clients outright) is strictly worse."""
+        Can hit a real slow client, but refusing everyone is worse."""
         with live_lock:
             if not live:
                 return False
