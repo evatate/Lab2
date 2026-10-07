@@ -128,7 +128,6 @@ def main():
         sys.stdout.buffer.write(f"{name}: {value}\r\n".encode("latin-1"))
     sys.stdout.buffer.write(b"\r\n")
     sys.stdout.buffer.write(body)
-    sys.stdout.buffer.write(b"\n")
     sys.stdout.buffer.flush()
 
     print(f"\n[client] received {len(body)} body bytes", file=sys.stderr)
