@@ -90,6 +90,6 @@ inspection). All the numbers in this README and the postmortem come from
 actually running the server and the attack scripts, not from the assistant's
 description of what the code does.
 
-## Partner
+## Author
 
-Eva Tate and Giselle Wu.
+Eva Tate

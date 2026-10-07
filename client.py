@@ -2,23 +2,19 @@
 
 # ==============================================================================
 # File Name:     client.py
-# Author:        Eva Tate and Giselle Wu
+# Author:        Eva Tate
+# AI Assistance: Claude wrote the initial draft of this file; Eva
+#                Tate tested, reviewed, and revised it.
 # Course:        CS60: Computer Networks
-# Assignment:    Lab 2: Application layer -- Hardened Web Server Lab
-# Date:          September 29, 2026
+# Assignment:    Lab 2: Application layer: Hardened Web Server Lab
+# Date:          October 6, 2026
 #
-# Description:   A minimal command-line HTTP/1.1 client. Sends a single GET
-#                request over a raw TCP socket and prints the full response
-#                (status line, headers, body), looping on recv() until the
-#                whole response -- however many packets it took -- has
-#                arrived.
+# Description:   Minimal HTTP/1.1 client: one GET over a raw socket, prints the
+#                full response.
 #
 # ==============================================================================
 
-"""HTTP/1.1 command-line client.
-
-Usage: python3 client.py <server_host> <server_port> <path>
-"""
+"""Usage: python3 client.py <server_host> <server_port> <path>"""
 
 import socket
 import sys
@@ -85,7 +81,7 @@ def fetch(host, port, path):
     elif headers.get("transfer-encoding", "").lower() == "chunked":
         body = read_chunked(sock, buf)
     else:
-        # No length given: read until the server closes the connection.
+        # no length, read until close
         while True:
             data = sock.recv(RECV_CHUNK)
             if not data:
@@ -106,7 +102,7 @@ def read_chunked(sock, buf):
             break
         chunk, buf = recv_exact(sock, buf, size)
         body += chunk
-        # consume the trailing CRLF after the chunk
+        # skip the chunk's trailing CRLF
         while len(buf) < 2:
             data = sock.recv(RECV_CHUNK)
             if not data:

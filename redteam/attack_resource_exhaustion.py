@@ -2,10 +2,12 @@
 
 # ==============================================================================
 # File Name:     redteam/attack_resource_exhaustion.py
-# Author:        Eva Tate and Giselle Wu
+# Author:        Eva Tate
+# AI Assistance: Claude wrote the initial draft of this file; Eva
+#                Tate tested, reviewed, and revised it.
 # Course:        CS60: Computer Networks
-# Assignment:    Lab 2: Application layer -- Hardened Web Server Lab
-# Date:          September 29, 2026
+# Assignment:    Lab 2: Application layer: Hardened Web Server Lab
+# Date:          October 6, 2026
 #
 # Description:   Slowloris (trickled headers), a slow body, oversized
 #                request line / headers / Content-Length, and confirmation
@@ -17,34 +19,10 @@
 # ==============================================================================
 
 """
-What each attack does and why it matters
------------------------------------------
-
-1. slowloris: opens several connections and trickles one byte of headers
-   every 2 seconds, never sending the blank line that ends them. A server
-   that resets its timeout on every successful recv() (rather than tracking
-   one absolute deadline for finishing the headers) never times these out,
-   because no single recv() call ever stalls long enough to trip a per-call
-   timeout. Expected: each connection is cut off with 408 once the
-   *cumulative* time to finish the headers exceeds the limit, regardless of
-   how the bytes were paced. Observed: all 5 trickled connections received
-   408 after ~15s (the server's HEADER_TIMEOUT), not 100s+ (which is how
-   long trickling the full header line/byte-by-byte would otherwise take).
-
-2. normal_client_during_attack: while the Slowloris connections above are
-   still open and trickling, a normal client sends one ordinary request.
-   Expected: it is served immediately, proving the attack doesn't block the
-   accept loop or starve other threads. Observed: served in ~0.00s.
-
-3. slow_body: declares Content-Length: 100 but sends only 5 bytes and then
-   stops. Expected: 408 after BODY_TIMEOUT, not an indefinite hang.
-   Observed: 408, "timeout reading body", after 30s.
-
-4. oversized_uri / oversized_header_line / too_many_headers /
-   oversized_content_length: blunt-force resource exhaustion via input size
-   rather than time. Expected: 414 / 431 / 431 / 413 respectively, all
-   without the server ever trying to buffer the full oversized input.
-   Observed: matches expected codes.
+1. slowloris: 5 conns trickle 1 byte / 2s of headers -> 408 after ~15s total
+2. normal client during the attack -> served right away
+3. Content-Length: 100 but only 5 bytes sent -> 408 after BODY_TIMEOUT
+4. oversized URI / header line / header count / Content-Length -> 414 / 431 / 431 / 413
 """
 
 import threading

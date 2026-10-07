@@ -2,24 +2,19 @@
 
 # ==============================================================================
 # File Name:     server.py
-# Author:        Eva Tate and Giselle Wu
+# Author:        Eva Tate
+# AI Assistance: Claude wrote the initial draft of this file; Eva
+#                Tate tested, reviewed, and revised it.
 # Course:        CS60: Computer Networks
-# Assignment:    Lab 2: Application layer -- Hardened Web Server Lab
-# Date:          September 29, 2026
+# Assignment:    Lab 2: Application layer: Hardened Web Server Lab
+# Date:          October 6, 2026
 #
-# Description:   A from-scratch HTTP/1.1 web server. Reads raw bytes off a TCP
-#                socket, parses GET requests by hand (no http.server / Flask /
-#                etc.), and serves files from the directory it is started in.
-#                Hardened against request smuggling, Slowloris-style resource
-#                exhaustion, oversized input, and path traversal.
+# Description:   From-scratch HTTP/1.1 GET server on raw sockets, hardened
+#                against smuggling, Slowloris, big input and path traversal.
 #
 # ==============================================================================
 
-"""Hardened HTTP/1.1 web server.
-
-Usage: python3 server.py <port>
-Serves files from the current working directory.
-"""
+"""Hardened HTTP/1.1 server. Usage: python3 server.py <port>"""
 
 import os
 import re
@@ -29,24 +24,19 @@ import threading
 import time
 import urllib.parse
 
-# ---------------------------------------------------------------------------
-# Tunable limits. These bound every untrusted input so a client can never
-# force the server into unbounded memory use or an indefinite wait.
-# ---------------------------------------------------------------------------
-
-MAX_CONNECTIONS = 500          # concurrent connections served at once
-HEADER_TIMEOUT = 15.0          # seconds allowed to finish request line + headers
-BODY_TIMEOUT = 30.0            # seconds allowed to finish reading a declared body
-IDLE_TIMEOUT = 20.0            # seconds to wait for the next request on keep-alive
+# limits on untrusted input
+MAX_CONNECTIONS = 500          # concurrent connections
+HEADER_TIMEOUT = 15.0          # secs to finish request line + headers
+BODY_TIMEOUT = 30.0            # secs to read the declared body
+IDLE_TIMEOUT = 20.0            # secs to wait for next keep-alive request
 RECV_CHUNK = 4096
 
 MAX_REQUEST_LINE = 8192        # -> 414 URI Too Long
 MAX_HEADER_LINE = 8192         # -> 431 Request Header Fields Too Large
 MAX_HEADER_COUNT = 100         # -> 431
-MAX_HEADER_BLOCK_BYTES = 65536 # total bytes of request line + headers -> 414/431
-MAX_BODY_SIZE = 1024 * 1024     # 1 MiB -> 413 Content Too Large (a GET has no
-                                 # legitimate reason to carry a body this big)
-MAX_CHUNK_SIZE_LINE = 4096     # a single "size\r\n" line in chunked encoding
+MAX_HEADER_BLOCK_BYTES = 65536 # request line + headers total -> 414/431
+MAX_BODY_SIZE = 1024 * 1024     # 1 MiB -> 413
+MAX_CHUNK_SIZE_LINE = 4096     # one chunk-size line
 
 LISTEN_BACKLOG = 128
 
@@ -76,11 +66,12 @@ CONTENT_TYPES = {
     ".gif": "image/gif",
 }
 
+TOKEN_RE = re.compile(rb"[!#$%&'*+.^_`|~0-9A-Za-z-]+")
 VERSION_RE = re.compile(rb"^HTTP/(\d+)\.(\d+)$")
 
 
 class HttpError(Exception):
-    """A request that must be rejected with a specific status code."""
+    """Request rejected with this status code."""
 
     def __init__(self, code, message=""):
         super().__init__(message)
@@ -88,20 +79,14 @@ class HttpError(Exception):
 
 
 class ConnectionClosed(Exception):
-    """The peer closed the connection (no more bytes will ever arrive)."""
+    """Peer closed the connection."""
 
 
 class TimedOut(Exception):
-    """A cumulative deadline (header/body/idle) elapsed before completion."""
+    """Cumulative deadline elapsed."""
 
 
-# ---------------------------------------------------------------------------
-# Buffered reader: turns the raw byte stream into the pieces we need
-# (a delimited line, or exactly N bytes) while enforcing a cumulative
-# deadline. A per-recv() timeout alone does not stop a trickle attack that
-# sends one byte just under the timeout each time; tracking an absolute
-# deadline across the whole read does.
-# ---------------------------------------------------------------------------
+# one cumulative deadline, since a per-recv timeout doesn't stop a trickle attack
 
 class BufferedReader:
     def __init__(self, sock):
@@ -122,9 +107,7 @@ class BufferedReader:
         self.buf.extend(data)
 
     def read_head_block(self, max_len, deadline):
-        """Read the request line + headers up to (and consuming) the blank
-        line b"\\r\\n\\r\\n". Rejects a bare CR or bare LF the moment it shows
-        up, rather than waiting for a b"\\r\\n\\r\\n" that will never arrive."""
+        """Read request line + headers; reject bare CR/LF right away instead of waiting."""
         while True:
             _check_bare_terminators(bytes(self.buf))
             idx = self.buf.find(b"\r\n\r\n")
@@ -137,9 +120,7 @@ class BufferedReader:
             self._fill(deadline)
 
     def read_until(self, delim, max_len, deadline, on_too_long):
-        """Read until `delim` is found, returning the bytes before it (delim
-        consumed but not included). Calls on_too_long(buf) -> HttpError if
-        the buffer grows past max_len before delim appears."""
+        """Read up to delim; on_too_long(buf) supplies the error past max_len."""
         while True:
             idx = self.buf.find(delim)
             if idx != -1:
@@ -161,30 +142,22 @@ class BufferedReader:
         return len(self.buf) > 0
 
 
-# ---------------------------------------------------------------------------
-# Request-line / header parsing
-# ---------------------------------------------------------------------------
+# parsing
 
 def _check_bare_terminators(buf):
-    """RFC 9112 requires every line end in CRLF. A lone LF (no preceding CR)
-    or a lone CR (not followed by LF) is illegal framing -- reject it as soon
-    as it appears instead of waiting for a terminator that will never come.
-    A CR as the very last buffered byte is left alone since the next recv()
-    may still complete it into a legal CRLF."""
+    """Reject bare LF/CR; a trailing CR is skipped, the next recv may complete the CRLF."""
     n = len(buf)
     for i, byte in enumerate(buf):
-        if byte == 0x0A:  # \n
+        if byte == 0x0A:
             if i == 0 or buf[i - 1] != 0x0D:
                 raise HttpError(400, "bare LF in request")
-        elif byte == 0x0D:  # \r
+        elif byte == 0x0D:
             if i < n - 1 and buf[i + 1] != 0x0A:
                 raise HttpError(400, "bare CR in request")
 
 
 def _classify_head_too_long(raw_head):
-    """A request line + headers blob exceeded MAX_HEADER_BLOCK_BYTES before
-    the blank line was found. If there's no CRLF at all yet, the request
-    line itself is the offender (414); otherwise it's the headers (431)."""
+    """Too long with no CRLF yet -> 414, else 431."""
     first_break = raw_head.find(b"\r\n")
     if first_break == -1 or first_break > MAX_REQUEST_LINE:
         return HttpError(414, "URI Too Long")
@@ -192,14 +165,11 @@ def _classify_head_too_long(raw_head):
 
 
 def read_head(reader, deadline):
-    """Read the request line + headers, up through the blank line. Returns
-    (request_line_bytes, [header_line_bytes, ...])."""
+    """Return (request_line, header_lines)."""
     raw = reader.read_head_block(MAX_HEADER_BLOCK_BYTES, deadline)
     lines = raw.split(b"\r\n")
 
-    # A properly CRLF-terminated line, once split on b"\r\n", must contain no
-    # further \r or \n. A leftover one means a bare CR or bare LF was present
-    # where a full CRLF was required -- reject rather than guess.
+    # CR/LF left after the split means a bare terminator
     for line in lines:
         if b"\r" in line or b"\n" in line:
             raise HttpError(400, "bare CR or LF in request")
@@ -240,17 +210,14 @@ def parse_request_line(request_line):
 
 
 def parse_headers(header_lines):
-    """Returns a dict of lowercased header name -> value, enforcing the
-    single-Host / no-conflicting-framing rules. Raises HttpError(400) on any
-    ambiguity rather than guessing which value to trust."""
+    """Lowercased name -> value; 400 on any ambiguity, never guess."""
     headers = {}
     host_seen = False
     content_length_seen = False
     transfer_encoding_seen = False
 
     for line in header_lines:
-        # Obsolete line folding (a continuation line starting with SP/HTAB)
-        # is forbidden by RFC 9112 and is itself a smuggling vector.
+        # obs-fold is a smuggling vector
         if line[:1] in (b" ", b"\t"):
             raise HttpError(400, "obsolete line folding")
 
@@ -260,13 +227,14 @@ def parse_headers(header_lines):
         name_raw = line[:colon]
         value = line[colon + 1 :].strip(b" \t")
 
-        # Whitespace before the colon is itself a smuggling technique: some
-        # servers strip it and some don't, letting an attacker hide a second
-        # header name from one of the two. Reject outright.
+        # some servers strip this space and some don't
         if name_raw != name_raw.rstrip(b" \t"):
             raise HttpError(400, "whitespace before header colon")
         if not name_raw:
             raise HttpError(400, "empty header name")
+        # names must be tokens
+        if not TOKEN_RE.fullmatch(name_raw):
+            raise HttpError(400, "invalid character in header name")
 
         name = name_raw.decode("latin-1").lower()
         value_str = value.decode("latin-1")
@@ -293,17 +261,14 @@ def parse_headers(header_lines):
     if not host_seen:
         raise HttpError(400, "missing Host header")
     if content_length_seen and transfer_encoding_seen:
-        # The defining ambiguity behind request smuggling: never guess which
-        # framing to trust.
+        # CL + TE is the smuggling ambiguity
         raise HttpError(400, "Content-Length and Transfer-Encoding both present")
 
     return headers
 
 
 def consume_body(reader, headers, deadline):
-    """Reads and discards exactly the declared body, however it is framed.
-    Must be called for every request, regardless of method, so a persistent
-    connection never mistakes trailing body bytes for the next request."""
+    """Read and discard the body so keep-alive never parses it as the next request."""
     if "transfer-encoding" in headers:
         consume_chunked_body(reader, deadline)
         return
@@ -321,7 +286,7 @@ def consume_chunked_body(reader, deadline):
             return HttpError(431, "chunk size line too long")
 
         size_line = reader.read_until(b"\r\n", MAX_CHUNK_SIZE_LINE, deadline, too_long)
-        size_field = size_line.split(b";", 1)[0].strip()
+        size_field = size_line.split(b";", 1)[0]  # no whitespace allowed
         if not size_field or not re.fullmatch(rb"[0-9A-Fa-f]+", size_field):
             raise HttpError(400, "malformed chunk size")
         size = int(size_field, 16)
@@ -331,7 +296,7 @@ def consume_chunked_body(reader, deadline):
             raise HttpError(413, "chunked body too large")
 
         if size == 0:
-            # Trailer section: zero or more header-like lines, then blank.
+            # trailers, then a blank line
             trailer_bytes = 0
             while True:
                 def trailer_too_long(_buf):
@@ -353,16 +318,10 @@ def consume_chunked_body(reader, deadline):
             raise HttpError(400, "malformed chunk terminator")
 
 
-# ---------------------------------------------------------------------------
-# Path safety
-# ---------------------------------------------------------------------------
+# path safety
 
 def safe_resolve_path(serve_dir, self_paths, raw_target):
-    """Maps a request-target to a file inside serve_dir, or raises
-    HttpError(403/404/400). Decodes percent-encoding exactly once (extra
-    layers of encoding just fail to match a real file, which is the correct,
-    safe outcome) and confirms the resolved, real path is still inside the
-    served directory before anything is opened."""
+    """Map target to a file in serve_dir or raise 400/403/404; decodes once only."""
     if not raw_target.startswith("/"):
         raise HttpError(400, "request-target must be origin-form")
 
@@ -399,9 +358,7 @@ def safe_resolve_path(serve_dir, self_paths, raw_target):
     return candidate
 
 
-# ---------------------------------------------------------------------------
-# Response writing
-# ---------------------------------------------------------------------------
+# responses
 
 def send_response(conn, code, body=b"", content_type="text/plain", connection="keep-alive"):
     reason = STATUS_REASONS[code]
@@ -424,11 +381,10 @@ def send_file_response(conn, path, connection):
     send_response(conn, 200, body, content_type, connection)
 
 
-# ---------------------------------------------------------------------------
-# Per-connection handling
-# ---------------------------------------------------------------------------
+# per-connection handling
 
-def handle_connection(conn, addr, serve_dir, self_paths):
+def handle_connection(conn, addr, serve_dir, self_paths, state=None):
+    state = state if state is not None else {}
     reader = BufferedReader(conn)
     log = lambda msg: print(f"[{time.strftime('%H:%M:%S')}] {addr[0]}:{addr[1]} {msg}", flush=True)
 
@@ -441,10 +397,10 @@ def handle_connection(conn, addr, serve_dir, self_paths):
                 request_line, header_lines = read_head(reader, idle_deadline)
             except TimedOut:
                 if reader.has_buffered():
-                    # A request was in progress (Slowloris-style trickle).
+                    # request in progress (Slowloris)
                     send_response(conn, 408, connection="close")
                     log("408 request timeout")
-                # else: idle keep-alive connection simply expired; close quietly.
+                # idle keep-alive expired, close quietly
                 return
             except ConnectionClosed:
                 return
@@ -472,6 +428,7 @@ def handle_connection(conn, addr, serve_dir, self_paths):
 
                 path = safe_resolve_path(serve_dir, self_paths, target)
                 send_file_response(conn, path, "keep-alive" if keep_alive else "close")
+                state["served"] = state.get("served", 0) + 1
                 log(f"200 GET {target!r}")
 
             except TimedOut:
@@ -488,7 +445,7 @@ def handle_connection(conn, addr, serve_dir, self_paths):
             if not keep_alive:
                 return
 
-    except Exception as e:  # noqa: BLE001 - never let one bad connection crash the server
+    except Exception as e:  # noqa: BLE001 - keep server up
         log(f"unexpected error: {e!r}")
     finally:
         try:
@@ -521,31 +478,52 @@ def main():
 
     connection_slots = threading.Semaphore(MAX_CONNECTIONS)
 
-    def worker(conn, addr):
+    # live connections, so one can be evicted at capacity
+    live = {}
+    live_lock = threading.Lock()
+
+    def worker(conn, addr, state):
         try:
-            handle_connection(conn, addr, serve_dir, self_paths)
+            handle_connection(conn, addr, serve_dir, self_paths, state)
         finally:
+            with live_lock:
+                live.pop(conn, None)
             connection_slots.release()
+
+    def evict_one():
+        """Shut the oldest never-served connection (else oldest overall)."""
+        with live_lock:
+            if not live:
+                return False
+            victim = min(live.items(),
+                         key=lambda kv: (kv[1].get("served", 0) > 0, kv[1]["t"]))[0]
+        try:
+            victim.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+        return True
 
     try:
         while True:
             try:
                 conn, addr = server_sock.accept()
             except OSError as e:
-                # E.g. EMFILE under an extreme connection flood: the process
-                # must stay up even if this one accept() can't succeed.
+                # e.g. EMFILE, stay up
                 print(f"accept() failed: {e!r}", flush=True)
                 time.sleep(0.1)
                 continue
             if not connection_slots.acquire(blocking=False):
-                # Already at capacity: shed load immediately rather than
-                # spawn an unbounded number of threads under a flood.
-                try:
-                    conn.close()
-                except OSError:
-                    pass
-                continue
-            threading.Thread(target=worker, args=(conn, addr), daemon=True).start()
+                # at capacity: evict so dead connections can't lock out real clients
+                if not (evict_one() and connection_slots.acquire(timeout=1.0)):
+                    try:
+                        conn.close()
+                    except OSError:
+                        pass
+                    continue
+            state = {"t": time.monotonic(), "served": 0}
+            with live_lock:
+                live[conn] = state
+            threading.Thread(target=worker, args=(conn, addr, state), daemon=True).start()
     except KeyboardInterrupt:
         pass
     finally:
