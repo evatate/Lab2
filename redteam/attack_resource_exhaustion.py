@@ -32,6 +32,7 @@ from util import report, send_raw, server_addr
 
 
 def slowloris(host, port, conn_id, results):
+    import select
     import socket
 
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -40,7 +41,12 @@ def slowloris(host, port, conn_id, results):
     try:
         for b in b"GET /helloworld.html HTTP/1.1\r\nHost: localhost\r\n":
             s.sendall(bytes([b]))
-            time.sleep(2)
+            # watch for the server giving up mid-trickle (it does, at ~15s)
+            # instead of sleeping blind and then sending into a dead socket
+            ready, _, _ = select.select([s], [], [], 2)
+            if ready:
+                results[conn_id] = s.recv(1024)
+                return
         results[conn_id] = s.recv(1024)
     except (socket.timeout, ConnectionResetError, BrokenPipeError) as e:
         results[conn_id] = f"<{e!r}>".encode()

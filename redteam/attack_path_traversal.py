@@ -17,14 +17,18 @@
 # ==============================================================================
 
 """
-Every target below should get 403 (404 for bare "/"), never file contents.
-1. /../server.py                         literal ../
-2. /..%2f..%2fetc%2fpasswd               percent-encoded
-3. /%2e%2e%2f%2e%2e%2fetc%2fpasswd       double-encoded, decoded only once so it won't match a file
-4. /helloworld.html%00.txt               null byte, rejected outright
-5. /.gitignore                           dotfile
-6. /server.py                            server source
-7. /                                     directory, 404 since no file named
+Every target below must never return file contents; the expected code
+differs by case since not every rejection reason is "forbidden":
+1. /../server.py                              literal ../          -> 403
+2. /..%2f..%2fetc%2fpasswd                    percent-encoded ../   -> 403
+3. /%252e%252e%252f...                        double-encoded ../    -> 404
+   (we decode exactly once, so this resolves to the literal filename
+   "%2e%2e%2f%2e%2e%2fetc%2fpasswd", which doesn't exist -- not a 403,
+   since it never actually escapes the served directory)
+4. /helloworld.html%00.txt                    null byte             -> 400
+5. /.gitignore                                dotfile               -> 403
+6. /server.py                                 server source         -> 403
+7. /                                          bare directory        -> 404
 """
 
 from util import report, send_raw, server_addr
@@ -36,7 +40,8 @@ def main():
     cases = [
         ("literal ../", "/../server.py"),
         ("percent-encoded ../ (%2e%2e%2f)", "/..%2f..%2fetc%2fpasswd"),
-        ("double-encoded ../ (%252e...)", "/%2e%2e%2f%2e%2e%2fetc%2fpasswd"),
+        ("double-encoded ../ (%252e%252e%252f)",
+         "/%252e%252e%252f%252e%252e%252fetc%252fpasswd"),
         ("null byte", "/helloworld.html%00.txt"),
         ("dotfile", "/.gitignore"),
         ("own source", "/server.py"),

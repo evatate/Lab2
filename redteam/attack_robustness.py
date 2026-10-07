@@ -221,7 +221,10 @@ def pipelining():
     n = 200
     data = talk(get(hdrs="Host: x\r\nConnection: keep-alive\r\n") * n, wait=8)
     got = codes(data).count(200)
-    print(f"  {'PASS  ' if got == n or got >= 1 else 'LANDED'} {n} pipelined GETs in one send -> {got} x 200 (server may cap; must not crash)")
+    ok = got == n
+    print(f"  {'PASS  ' if ok else 'LANDED'} {n} pipelined GETs in one send -> {got} x 200 (expected all {n} served)")
+    if not ok:
+        landed.append("pipelined GETs not all served")
     req = get()
     data = talk(b"", chunks=[req[i:i + 1] for i in range(len(req))], delay=0.01, wait=5)
     ok = codes(data) == [200]
@@ -235,8 +238,9 @@ def pipelining():
     if not ok:
         landed.append("split body")
     data = talk(b"", chunks=[b"GET /helloworld.html HTTP/1.1\r", b"\nHost: x\r\n\r\n"], delay=0.3, wait=5)
-    print(f"  PASS   CRLF split across segments -> {codes(data)} (expected [200])")
-    if codes(data) != [200]:
+    ok = codes(data) == [200]
+    print(f"  {'PASS  ' if ok else 'LANDED'} CRLF split across segments -> {codes(data)} (expected [200])")
+    if not ok:
         landed.append("split CRLF")
 
 

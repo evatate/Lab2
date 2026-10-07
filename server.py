@@ -29,6 +29,8 @@ MAX_CONNECTIONS = 500          # concurrent connections
 HEADER_TIMEOUT = 15.0          # secs to finish request line + headers
 BODY_TIMEOUT = 30.0            # secs to read the declared body
 IDLE_TIMEOUT = 20.0            # secs to wait for next keep-alive request
+WRITE_TIMEOUT = 60.0           # secs to flush a response; own deadline, not
+                               # whatever was left on the read-side timer
 RECV_CHUNK = 4096
 
 MAX_REQUEST_LINE = 8192        # -> 414 URI Too Long
@@ -108,8 +110,9 @@ class BufferedReader:
 
     def read_head_block(self, max_len, deadline):
         """Read request line + headers; reject bare CR/LF right away instead of waiting."""
+        checked = 0
         while True:
-            _check_bare_terminators(bytes(self.buf))
+            checked = _check_bare_terminators(self.buf, checked)
             idx = self.buf.find(b"\r\n\r\n")
             if idx != -1:
                 head = bytes(self.buf[:idx])
@@ -144,16 +147,26 @@ class BufferedReader:
 
 # parsing
 
-def _check_bare_terminators(buf):
-    """Reject bare LF/CR; a trailing CR is skipped, the next recv may complete the CRLF."""
+def _check_bare_terminators(buf, checked):
+    """Scan buf for a bare LF/CR, starting from `checked` so a trickled
+    request doesn't get rescanned from byte zero on every recv() (that's
+    quadratic in the final header size). Returns the new checked count. A
+    trailing CR is left unchecked and rescanned next call, since the next
+    recv() may still complete it into a legal CRLF."""
     n = len(buf)
-    for i, byte in enumerate(buf):
+    i = checked
+    while i < n:
+        byte = buf[i]
         if byte == 0x0A:
             if i == 0 or buf[i - 1] != 0x0D:
                 raise HttpError(400, "bare LF in request")
         elif byte == 0x0D:
-            if i < n - 1 and buf[i + 1] != 0x0A:
+            if i == n - 1:
+                return i
+            if buf[i + 1] != 0x0A:
                 raise HttpError(400, "bare CR in request")
+        i += 1
+    return n
 
 
 def _classify_head_too_long(raw_head):
@@ -370,6 +383,7 @@ def send_response(conn, code, body=b"", content_type="text/plain", connection="k
         "",
         "",
     ]
+    conn.settimeout(WRITE_TIMEOUT)
     conn.sendall("\r\n".join(headers).encode("latin-1") + body)
 
 
@@ -418,8 +432,12 @@ def handle_connection(conn, addr, serve_dir, self_paths, state=None):
                 headers = parse_headers(header_lines)
                 consume_body(reader, headers, body_deadline)
 
-                client_wants_close = headers.get("connection", "").strip().lower() == "close"
-                keep_alive = not client_wants_close
+                connection_header = headers.get("connection", "").strip().lower()
+                if version == (1, 0):
+                    # HTTP/1.0 defaults to close; keep-alive is opt-in
+                    keep_alive = connection_header == "keep-alive"
+                else:
+                    keep_alive = connection_header != "close"
 
                 if method != "GET":
                     send_response(conn, 501, connection="close")
@@ -454,6 +472,21 @@ def handle_connection(conn, addr, serve_dir, self_paths, state=None):
             pass
 
 
+SOURCE_EXTENSIONS = (".py", ".md")
+
+
+def collect_source_paths(serve_dir):
+    """Every .py/.md file under serve_dir at startup -- not just server.py and
+    client.py, so redteam/*.py, NOTES.md, README.md etc. are covered too even
+    though they weren't named individually."""
+    paths = set()
+    for root, _dirs, files in os.walk(serve_dir):
+        for name in files:
+            if name.lower().endswith(SOURCE_EXTENSIONS):
+                paths.add(os.path.realpath(os.path.join(root, name)))
+    return paths
+
+
 def main():
     if len(sys.argv) != 2:
         print(f"Usage: {sys.argv[0]} <port>", file=sys.stderr)
@@ -465,10 +498,7 @@ def main():
         sys.exit(1)
 
     serve_dir = os.path.realpath(os.getcwd())
-    self_paths = {
-        os.path.realpath(os.path.join(serve_dir, "server.py")),
-        os.path.realpath(os.path.join(serve_dir, "client.py")),
-    }
+    self_paths = collect_source_paths(serve_dir)
 
     server_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -491,7 +521,10 @@ def main():
             connection_slots.release()
 
     def evict_one():
-        """Shut the oldest never-served connection (else oldest overall)."""
+        """Shut the oldest never-served connection (else oldest overall).
+        Tradeoff: at the cap, this can shut a legitimate client that is still
+        reading its first request, not only an attacker's stalled one -- but
+        the alternative (refuse new clients outright) is strictly worse."""
         with live_lock:
             if not live:
                 return False
