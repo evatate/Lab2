@@ -21,11 +21,12 @@ Every target below must never return file contents; the expected code
 differs by case since not every rejection reason is "forbidden":
 1. /../server.py                              literal ../          -> 403
 2. /..%2f..%2fetc%2fpasswd                    percent-encoded ../   -> 403
-3. /%252e%252e%252f...                        double-encoded ../    -> 404
-   (we decode exactly once, so this resolves to the literal filename
-   "%2e%2e%2f%2e%2e%2fetc%2fpasswd", which doesn't exist -- not a 403,
-   since it never actually escapes the served directory)
-4. /helloworld.html%00.txt                    null byte             -> 400
+3. /%252e%252e%252f...                        double-encoded ../    -> 403
+   (path resolution itself only decodes once, so this would otherwise
+   resolve to the inert literal filename "%2e%2e%2f...passwd" and 404 --
+   but a second, detection-only decode catches that a further decode
+   would reveal "../../etc/passwd" and rejects it outright instead)
+4. /helloworld.html%00.txt                    null byte             -> 403
 5. /.gitignore                                dotfile               -> 403
 6. /server.py                                 server source         -> 403
 7. /                                          bare directory        -> 404

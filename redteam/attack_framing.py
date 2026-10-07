@@ -19,7 +19,10 @@
 """
 1. two Content-Length headers (5 and 10) -> 400
 2. Content-Length plus Transfer-Encoding: chunked -> 400
-3. bare LF line endings -> 400 (see NOTES.md for the old 15s hang)
+3. bare LF line endings -> 400 (an earlier version had no bare-CR/LF check
+   at all, so this request waited on a b"\r\n\r\n" that never arrives and
+   got a 408 after the full 15s HEADER_TIMEOUT instead of an immediate 400;
+   postmortem pending)
 4. Content-Length: 5 with 10 body bytes and a pipelined GET -> 200, then 501 on the leftover
 5. non-hex chunk size, and a missing chunk CRLF -> 400 for both
 6. "Content-Length : 5" (space before colon) -> 400

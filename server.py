@@ -32,6 +32,7 @@ IDLE_TIMEOUT = 20.0            # secs to wait for next keep-alive request
 WRITE_TIMEOUT = 60.0           # secs to flush a response; own deadline, not
                                # whatever was left on the read-side timer
 RECV_CHUNK = 4096
+SEND_CHUNK = 65536             # file response streaming chunk size
 
 MAX_REQUEST_LINE = 8192        # -> 414 URI Too Long
 MAX_HEADER_LINE = 8192         # -> 431 Request Header Fields Too Large
@@ -112,8 +113,14 @@ class BufferedReader:
         """Read request line + headers; reject bare CR/LF right away instead of waiting."""
         checked = 0
         while True:
-            checked = _check_bare_terminators(self.buf, checked)
             idx = self.buf.find(b"\r\n\r\n")
+            # Never scan past the terminator: body bytes that arrived in the
+            # same recv() as b"\r\n\r\n" aren't subject to the header CRLF
+            # rule, and scanning them anyway made a bare '\n' in the body
+            # (perfectly legal there) a false 400 -- but only when it
+            # happened to land in the same TCP segment as the headers.
+            limit = idx + 4 if idx != -1 else len(self.buf)
+            checked = _check_bare_terminators(self.buf, checked, limit)
             if idx != -1:
                 head = bytes(self.buf[:idx])
                 del self.buf[: idx + 4]
@@ -147,23 +154,27 @@ class BufferedReader:
 
 # parsing
 
-def _check_bare_terminators(buf, checked):
-    """Scan buf for a bare LF/CR from `checked` on; return the new count.
-    A trailing CR is rechecked next time, it may still become CRLF."""
-    n = len(buf)
+def _check_bare_terminators(buf, checked, limit):
+    """Scan buf[checked:limit] for a bare LF/CR; return the new checked
+    count. `limit` caps the scan at the end of the head block (the found
+    b"\\r\\n\\r\\n", or the whole buffer if it hasn't arrived yet) so body
+    bytes already sitting in the buffer are never scanned -- a bare '\\n'
+    is illegal in a header line but perfectly legal inside a body. A
+    trailing CR right at `limit` is left unchecked and rechecked next
+    call, since more data may still complete it into a legal CRLF."""
     i = checked
-    while i < n:
+    while i < limit:
         byte = buf[i]
         if byte == 0x0A:
             if i == 0 or buf[i - 1] != 0x0D:
                 raise HttpError(400, "bare LF in request")
         elif byte == 0x0D:
-            if i == n - 1:
+            if i == limit - 1:
                 return i
             if buf[i + 1] != 0x0A:
                 raise HttpError(400, "bare CR in request")
         i += 1
-    return n
+    return limit
 
 
 def _classify_head_too_long(raw_head):
@@ -331,7 +342,11 @@ def consume_chunked_body(reader, deadline):
 # path safety
 
 def safe_resolve_path(serve_dir, self_paths, raw_target):
-    """Map target to a file in serve_dir or raise 400/403/404; decodes once only."""
+    """Map target to a file in serve_dir or raise 400/403/404. The path
+    resolution itself only decodes once; a second, detection-only decode
+    (not used for resolution) catches a target that was still percent-
+    encoded after the first pass and would have turned into a traversal
+    attempt on a second decode -- a 403, not a silent 404."""
     if not raw_target.startswith("/"):
         raise HttpError(400, "request-target must be origin-form")
 
@@ -343,7 +358,7 @@ def safe_resolve_path(serve_dir, self_paths, raw_target):
         raise HttpError(400, "malformed percent-encoding")
 
     if "\x00" in decoded:
-        raise HttpError(400, "null byte in request target")
+        raise HttpError(403, "null byte in request target")
 
     # still encoded after one decode: double-encoded traversal attempt
     again = urllib.parse.unquote(decoded)
@@ -375,26 +390,43 @@ def safe_resolve_path(serve_dir, self_paths, raw_target):
 
 # responses
 
-def send_response(conn, code, body=b"", content_type="text/plain", connection="keep-alive"):
+def _send_headers(conn, code, content_length, content_type="text/plain", connection="keep-alive"):
     reason = STATUS_REASONS[code]
     headers = [
         f"HTTP/1.1 {code} {reason}",
         f"Content-Type: {content_type}",
-        f"Content-Length: {len(body)}",
+        f"Content-Length: {content_length}",
         f"Connection: {connection}",
         "",
         "",
     ]
     conn.settimeout(WRITE_TIMEOUT)
-    conn.sendall("\r\n".join(headers).encode("latin-1") + body)
+    conn.sendall("\r\n".join(headers).encode("latin-1"))
+
+
+def send_response(conn, code, body=b"", content_type="text/plain", connection="keep-alive"):
+    _send_headers(conn, code, len(body), content_type, connection)
+    if body:
+        conn.settimeout(WRITE_TIMEOUT)
+        conn.sendall(body)
 
 
 def send_file_response(conn, path, connection):
+    # Stream in fixed-size chunks rather than f.read()-ing the whole file:
+    # one bytes object per connection the size of the file (up to 5 MiB for
+    # english_words.txt here) means N stalled readers hold N full copies in
+    # memory at once. SEND_CHUNK bounds that to a constant per connection.
     ext = os.path.splitext(path)[1].lower()
     content_type = CONTENT_TYPES.get(ext, "application/octet-stream")
+    size = os.path.getsize(path)
+    _send_headers(conn, 200, size, content_type, connection)
     with open(path, "rb") as f:
-        body = f.read()
-    send_response(conn, 200, body, content_type, connection)
+        while True:
+            chunk = f.read(SEND_CHUNK)
+            if not chunk:
+                break
+            conn.settimeout(WRITE_TIMEOUT)
+            conn.sendall(chunk)
 
 
 # per-connection handling

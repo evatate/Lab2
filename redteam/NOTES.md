@@ -17,7 +17,7 @@ Server: 400 on every ambiguous one and the connection closes. For the over-long 
 
 **attack_path_traversal.py**
 Literal `../`, `%2e%2e%2f`, double-encoded (`%252e%252e%252f`), null byte, dotfile, the server's own source, and a bare directory.
-Server: 403 for the literal and percent-encoded escapes, the dotfile, and the own-source request; 400 for the null byte; 404 for the double-encoded attempt (decoded once, it's a literal filename that doesn't exist, not a real escape) and for the bare directory.
+Server: 403 for the literal and percent-encoded escapes, the double-encoded attempt (a second, detection-only decode shows it would reveal `../../etc/passwd`, so it's rejected instead of resolving to an inert literal filename), the null byte, the dotfile, and the own-source request; 404 only for the bare directory.
 
 **attack_protocol_edges.py**
 Missing Host, duplicate Host, `HTTP/9.9`, and a POST with a body and a GET pipelined behind it.
@@ -60,8 +60,15 @@ Not things any attack script caught -- found by reading the code, not by running
 3. **`sendall()` borrowed whatever timeout was left on the socket from the last `recv()`.** That's fine by accident for a short response, but a legitimately slow download of `english_words.txt` could get cut off by a read-side deadline it has nothing to do with. Added a separate `WRITE_TIMEOUT` so writes have their own, intentional budget instead of an inherited one.
 4. **HTTP/1.0 defaulted to keep-alive.** The spec says 1.0 should default to `close` unless the client opts in with `Connection: keep-alive`; we treated 1.0 and 1.1 the same, so a plain 1.0 client would sit on the connection until `IDLE_TIMEOUT` instead of getting a prompt close.
 5. **Eviction at the connection cap can shut a legitimate client's first request, not just an attacker's.** This is a real tradeoff, not a bug -- the alternative is refusing new clients outright once the cap is hit, which is worse. Left as is, documented in a comment next to `evict_one()`.
+6. **A double-encoded traversal attempt (`%252e%252e%252f...`) decoded once resolves to a literal, nonexistent filename and would otherwise 404** -- technically safe (it never escapes the served directory), but silently swallowing an attack as a 404 instead of naming it is worse than flagging it. `safe_resolve_path` now does one extra, detection-only decode: if that second decode would reveal `..`/`\\`/an extra `/` that the first decode didn't have, it's rejected as a 403 outright instead of falling through to "file not found."
 
 I also fixed two scripts that were checking less than they looked like they were:
 
 - **`attack_resource_exhaustion.py`'s `slowloris()`** trickled for ~96s (48 bytes x 2s) but the server's `HEADER_TIMEOUT` is 15s, so the script was always sending into an already-closed socket by the time it got around to `recv()` -- it recorded the resulting `ConnectionResetError`, never the actual `408`. Now it polls with `select()` after each byte so it reads the 408 the moment the server sends it.
 - **`attack_robustness.py` had two assertions that couldn't fail.** The 200-pipelined-GETs check accepted `got >= 1`, i.e. passed even if 199 of 200 were silently dropped; tightened to require all 200. The CRLF-split-across-segments case printed `PASS` unconditionally before it had looked at the result at all; it now checks first.
+
+## Third pass: one real false-positive bug, one memory bound, one code-vs-handout mismatch
+
+1. **A bare `\n` inside the body could get rejected as a bare LF in the request.** `_check_bare_terminators` scanned the *entire* buffered bytearray, and when the headers' `\r\n\r\n` terminator and the start of the body arrived in the same `recv()`, that scan ran past the terminator and into the body -- so `Content-Length: 11` with a body of `hello\nworld` got a wrong `400` if it arrived in one segment, and the correct `200` if the body happened to arrive in a later segment. Behavior that depends on where the TCP segment boundary happens to fall is exactly the bug class this lab is about. Fixed by capping the scan at the end of the found `\r\n\r\n` (or the whole buffer if it hasn't arrived yet) instead of the whole buffer regardless.
+2. **`send_file_response` read the whole file into memory per connection.** `f.read()` on `english_words.txt` (~5 MB) means N stalled connections hold N full copies in memory -- 500 stalled readers is on the order of 2.5 GB. Rewrote it to stream in 64 KiB chunks instead, so memory per connection is bounded by the chunk size, not the file size.
+3. **Null byte now returns 403, not 400.** The handout's path-safety paragraph groups a null byte with traversal and encoding tricks and expects it handled the same way as those (403); the status-code table's 400 is for malformed framing, not path-safety rejections specifically. Changed for consistency with the double-encoded-path check above, which is also a 403.
